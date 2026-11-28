@@ -291,23 +291,25 @@ For `Indexed` Jobs, the `ElasticJobUngater` ungates Pods in ascending `batch.kub
 
 When an elastic job is dispatched through MultiKueue ([KEP-693](../693-multikueue/README.md), [KEP-77 Phase 3](../77-dynamically-sized-jobs/README.md#phase-3--enabling-workload-slicing-for-batchv1job-in-multi-cluster-configuration)), each slice is admitted twice: the manager's scheduler reserves quota on the manager Workload, and the worker's scheduler admits the copy MultiKueue creates on the selected worker cluster. The two reducers can grant different counts for the same slice:
 
-- the **manager grant** is `status.admission.podSetAssignments[i].count` on the manager Workload. It is the baseline of the next probe (see [Probe lifecycle](#probe-lifecycle)) and the usage charged to the manager ClusterQueue;
-- the **worker grant** is the same field on the worker Workload. It is what the worker's `ElasticJobUngater` releases, so it decides how many Pods run.
+- the **manager grant** is `status.admission.podSetAssignments[i].count` on the manager Workload, and the **worker grant** is the same field on the worker Workload. Both are immutable once set;
+- a Workload's **effective count** is `min(grant[i], count[i])`: its grant capped by its current `spec.podSets[i].count`, which an in-place scale-down may have lowered below the grant. The rules below compare effective counts, never raw grants.
+
+The manager's effective count is the baseline of the next probe (see [Probe lifecycle](#probe-lifecycle)) and the usage charged to the manager ClusterQueue. The worker's effective count is what the worker's `ElasticJobUngater` releases, so it decides how many Pods run.
 
 #### Bounded worker request
 
-When MultiKueue creates or updates the worker copy of a slice with a manager quota reservation, each PodSet `i` with a `minCount` is bounded by the manager grant:
+When MultiKueue creates or updates the worker copy of a slice with a manager quota reservation, each PodSet `i` with a `minCount` is bounded by the manager's effective count:
 
 ```
-remote.count[i]    = min(target[i], managerGrant[i])
+remote.count[i]    = min(target[i], managerEffective[i])
 remote.minCount[i] = min(minCount[i], remote.count[i])
 ```
 
-PodSets without a `minCount` are copied unchanged. The worker reducer searches `[remote.minCount[i], remote.count[i]]`, so `workerGrant[i] <= managerGrant[i]`: a worker never runs Pods the manager has not reserved quota for.
+PodSets without a `minCount` are copied unchanged. The worker reducer searches `[remote.minCount[i], remote.count[i]]`, so `workerEffective[i] <= managerEffective[i]`: a worker never runs Pods the manager has not reserved quota for.
 
 #### Reflecting a smaller worker grant
 
-Once both Workloads are admitted, for every PodSet `i` with a `minCount` where `workerGrant[i] < count[i]` on the manager Workload, Kueue applies the in-place scale-down from [Baseline and target semantics](#baseline-and-target-semantics) to the manager Workload: `count[i]` becomes `workerGrant[i]` and the stored `minCount[i]` is capped at it. The admission is immutable and keeps `managerGrant[i]`; the effective count `min(managerGrant[i], count[i])` now equals the worker grant, so manager usage and the next baseline reflect what runs.
+Once both Workloads are admitted, for every PodSet `i` with a `minCount` where `workerEffective[i] < managerEffective[i]`, Kueue applies the in-place scale-down from [Baseline and target semantics](#baseline-and-target-semantics) to the manager Workload: `count[i]` becomes `workerEffective[i]` and the stored `minCount[i]` is capped at it. The manager grant is immutable, so lowering `count[i]` is the only way to bring the manager's effective count down to the worker's; afterwards manager usage and the next baseline reflect what runs. A manager that was itself partially admitted at the worker's level already has that effective count, so nothing is written and its `count[i]` keeps the target, as after a single-cluster partial admission.
 
 The job's desired counts are unchanged, so the job controller creates the next probe at the full target, as after a single-cluster partial admission. That probe is bounded on dispatch like any other slice.
 
@@ -328,7 +330,7 @@ With [KEP-13243](../13243-multikueue-worker-cluster-autoscaling/README.md), the 
 A `RayCluster` with one worker group runs with 1 replica and its autoscaler requests 6. The job controller creates slice `wl-B` (`target = 6`, `minCount = 1`) replacing `wl-A`.
 
 - **Manager grants 6, worker grants 2.** `wl-B` is dispatched with `count = 6`; the worker admits 2. Kueue lowers `wl-B` on the manager to `count = 2`, `minCount = 1`, keeping its admission at 6. The job controller creates probe `wl-C` (`target = 6`, baseline 2) under a `scale-up-probe` name; when the worker has room, `wl-C` is admitted at 6 and replaces `wl-B`.
-- **Manager grants 2, worker grants 2.** `wl-B` is dispatched with `count = 2`, so the worker can admit at most 2 and no correction is needed. Probe `wl-C` (`target = 6`) stays pending on the manager until quota is available.
+- **Manager grants 2, worker grants 2.** `wl-B` is dispatched with `count = 2`, so the worker can admit at most 2. Both effective counts are 2, so `wl-B` on the manager keeps `count = 6` and nothing is written. Probe `wl-C` (`target = 6`) stays pending on the manager until quota is available.
 
 ### Partial ScaleUp for multiple PodSets
 
@@ -466,7 +468,7 @@ The accepted number of pods in each PodSet is recorded in `workload.Status.Admis
 - Verifying the `ElasticJobUngater` selects `Indexed` `batch/v1 Job` Pods for ungating in numeric `batch.kubernetes.io/job-completion-index` order when indexes are valid and unique, falling back to name order otherwise.
 - Verifying MultiKueue bounds the worker copy of a slice by the manager grant and leaves PodSets without `minCount` and non-elastic Workloads unchanged.
 - Verifying a selected worker that scaled down in place is kept, while an unselected or otherwise drifted worker copy is still replaced.
-- Verifying a smaller worker grant lowers the manager slice's `count` and `minCount` while preserving its admission.
+- Verifying a smaller worker grant lowers the manager slice's `count` and `minCount` while preserving its admission, and that a manager partially admitted at the worker's level is left unchanged.
 - Verifying an existing oversized worker admission is preserved while independent updates and manager eviction still propagate.
 - Verifying the probe created after a grant correction gets a distinct name, and a job resize uses the new revision's ordinary name.
 
