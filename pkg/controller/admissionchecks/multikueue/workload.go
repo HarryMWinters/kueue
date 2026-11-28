@@ -2020,14 +2020,17 @@ func isAdmittedPartialScaleUpWorkload(wl *kueue.Workload) bool {
 
 // Reuse elastic scale-down accounting for a smaller execution-side grant. Ray's
 // desired count remains on the job, so the next slice can request the remainder.
+// The manager is compared by its effective count, min(admission, spec), so a
+// manager that was itself partially admitted at the worker's level is left alone.
 func (w *wlReconciler) reconcilePartialScaleUpCounts(ctx context.Context, local, remote *kueue.Workload) error {
 	if !isAdmittedPartialScaleUpWorkload(local) || !workload.IsAdmitted(remote) {
 		return nil
 	}
-	granted := workload.ExtractGrantedPodSetCounts(remote)
+	workerCounts := workload.ExtractGrantedPodSetCounts(remote)
+	managerCounts := workload.ExtractGrantedPodSetCounts(local)
 	reductions := make(workload.PodSetsCounts)
 	for _, ps := range local.Spec.PodSets {
-		if count, found := granted[ps.Name]; found && ps.MinCount != nil && count < ps.Count {
+		if count, found := workerCounts[ps.Name]; found && ps.MinCount != nil && count < managerCounts[ps.Name] {
 			reductions[ps.Name] = count
 		}
 	}
