@@ -98,7 +98,7 @@ Also, a new Workload will be created and added to the queue to advance the scale
 
 Every Workload is defined by two per-PodSet count vectors, read for every PodSet `i`:
 
-- **Baseline** (`baseline[i]`): the lowest count the PodSet can be reduced to, given by `spec.podSets[i].minCount`. When `minCount` is unset, `baseline[i] = target[i]` — the PodSet cannot be reduced below its target (see `ps0` in [Example of RayJob with multiple PodSets](#example-of-rayjob-with-multiple-podsets)). For a scale-up replacement Workload, the scheduler also takes the replaced Workload into account: while it is admitted, its granted count (`status.admission.podSetAssignments[i].count`) is used as the baseline, so the scale-up must grow past what is already running.
+- **Baseline** (`baseline[i]`): the lowest count the PodSet can be reduced to, given by `spec.podSets[i].minCount`. When `minCount` is unset, `baseline[i] = target[i]` — the PodSet cannot be reduced below its target (see `ps0` in [Example of RayJob with multiple PodSets](#example-of-rayjob-with-multiple-podsets)). For a scale-up replacement Workload, the scheduler also takes the replaced Workload into account: while it is admitted, its granted count (`status.admission.podSetAssignments[i].count`, capped at its current `spec.podSets[i].count` after an in-place scale-down) is used as the baseline, so the scale-up must grow past what is already running.
 - **Target** (`target[i]`): the requested count in the Workload's spec, `spec.podSets[i].count`.
 
 The job controller (the per-job-kind reconciler that builds the Workload for `batch/v1 Job`, `RayJob`, `RayCluster`, and `RayService`) sets `minCount` to the initial count for the initial Workload.
@@ -305,7 +305,7 @@ remote.count[i]    = min(target[i], managerEffective[i])
 remote.minCount[i] = min(minCount[i], remote.count[i])
 ```
 
-PodSets without a `minCount` are copied unchanged. The worker reducer searches `[remote.minCount[i], remote.count[i]]`, so `workerEffective[i] <= managerEffective[i]`: a worker never runs Pods the manager has not reserved quota for.
+PodSets without a `minCount` are copied unchanged. The worker reducer searches `[remote.minCount[i], remote.count[i]]`, so `workerEffective[i] <= managerEffective[i]` for every slice dispatched under this rule: a worker never runs Pods the manager has not reserved quota for.
 
 #### Reflecting a smaller worker grant
 
@@ -323,7 +323,7 @@ A worker grant above the manager reservation can only predate the bounded reques
 
 #### Worker-side autoscaling
 
-With [KEP-13243](../13243-multikueue-worker-cluster-autoscaling/README.md), the Ray autoscaler on the worker raises the desired counts, MultiKueue reflects them onto the manager object, and the manager's job controller creates the probe. The rules above apply unchanged.
+With [KEP-13243](../13243-multikueue-worker-cluster-autoscaling/README.md) (the `MultiKueueRayInTreeAutoscaling` feature gate, off by default, and `enableInTreeAutoscaling` on the RayCluster), the Ray autoscaler on the worker raises the desired counts, MultiKueue reflects them onto the manager object, and the manager's job controller creates the probe. The rules above apply unchanged.
 
 #### Example: asymmetric grants
 
@@ -510,7 +510,7 @@ The accepted number of pods in each PodSet is recorded in `workload.Status.Admis
 
 - v0.20: Alpha, with the `RayJob`, `RayCluster`, and `RayService` integrations.
 - v0.21: `batch/v1 Job` integration.
-- v0.22: MultiKueue support for asymmetric manager and worker grants (see [MultiKueue](#multikueue)).
+- v0.22: MultiKueue support for asymmetric manager and worker grants (see [MultiKueue](#multikueue); [#19106](https://github.com/kubernetes-sigs/kueue/pull/19106)).
 
 ## Limitations
 - MultiKueue: a worker with `ElasticJobsViaWorkloadSlices` disabled rejects the count reduction in [Reflecting a smaller worker grant](#reflecting-a-smaller-worker-grant), which also blocks independent updates to that worker Workload. Tracked in [#19110](https://github.com/kubernetes-sigs/kueue/issues/19110).

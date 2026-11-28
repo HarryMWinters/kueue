@@ -17,7 +17,7 @@ see-also:
   - "/keps/13243-multikueue-worker-cluster-autoscaling"
 
 stage: alpha
-latest-milestone: "v0.21"
+latest-milestone: "v0.22"
 milestone:
   alpha: "v0.20"
 
